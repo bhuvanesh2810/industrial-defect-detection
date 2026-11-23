@@ -1,7 +1,7 @@
 
 import streamlit as st
 from ultralytics import YOLO
-from PIL import Image, ImageDraw
+from PIL import Image
 from pathlib import Path
 from io import BytesIO
 from datetime import datetime
@@ -182,15 +182,11 @@ def create_detection_dataframe(result, model_names):
 
     for index, box in enumerate(result.boxes, start=1):
         class_id = int(box.cls.item())
-        raw_confidence = float(box.conf.item()) * 100
-        adjusted_score = max(85.0, raw_confidence)
         coordinates = box.xyxy[0].tolist()
 
         rows.append({
             "Detection ID": index,
             "Defect Class": model_names[class_id],
-            "Adjusted Display Score (%)": round(adjusted_score, 2),
-            "Raw YOLO Confidence (%)": round(raw_confidence, 2),
             "X1": round(coordinates[0], 1),
             "Y1": round(coordinates[1], 1),
             "X2": round(coordinates[2], 1),
@@ -200,8 +196,6 @@ def create_detection_dataframe(result, model_names):
     columns = [
         "Detection ID",
         "Defect Class",
-        "Adjusted Display Score (%)",
-        "Raw YOLO Confidence (%)",
         "X1", "Y1", "X2", "Y2"
     ]
 
@@ -227,8 +221,6 @@ def create_combined_dataframe(results):
         "Image",
         "Detection ID",
         "Defect Class",
-        "Adjusted Display Score (%)",
-        "Raw YOLO Confidence (%)",
         "X1", "Y1", "X2", "Y2"
     ]
 
@@ -336,21 +328,9 @@ def run_inspection(
 
             elapsed = time.perf_counter() - start_time
 
-            annotated = image.copy()
-            draw = ImageDraw.Draw(annotated)
-            for box in prediction.boxes:
-                coords = box.xyxy[0].tolist()
-                x1, y1, x2, y2 = [int(value) for value in coords]
-                class_id = int(box.cls.item())
-                raw_score = float(box.conf.item()) * 100
-                display_score = max(85.0, raw_score)
-                label = (
-                    f"{model.names[class_id]} | {display_score:.1f}%*"
-                )
-                draw.rectangle((x1, y1, x2, y2), outline="#00E5FF", width=3)
-                text_box = draw.textbbox((x1, max(0, y1 - 22)), label)
-                draw.rectangle(text_box, fill="#092033")
-                draw.text((x1, max(0, y1 - 22)), label, fill="#FFFFFF")
+            annotated = Image.fromarray(
+                prediction.plot(conf=False)[..., ::-1]
+            )
 
             dataframe = create_detection_dataframe(
                 prediction, model.names
@@ -370,14 +350,10 @@ def run_inspection(
                     crop = image.crop((x1, y1, x2, y2))
 
                     class_id = int(box.cls.item())
-                    raw_score = float(box.conf.item()) * 100
-                    display_score = max(85.0, raw_score)
 
                     crops.append({
                         "image": crop,
-                        "class": model.names[class_id],
-                        "confidence": round(display_score, 2),
-                        "raw_confidence": round(raw_score, 2)
+                        "class": model.names[class_id]
                     })
 
             results.append({
@@ -485,10 +461,6 @@ unique_classes = (
     if not all_data.empty else 0
 )
 
-average_confidence = (
-    all_data["Adjusted Display Score (%)"].mean()
-    if not all_data.empty else 0
-)
 
 
 # --------------------------------------------------
@@ -508,7 +480,7 @@ if page == "Dashboard":
         (c1, "IMAGES INSPECTED", total_images),
         (c2, "DEFECT REGIONS", total_defects),
         (c3, "DEFECT CLASSES", unique_classes),
-        (c4, "AVG ADJUSTED DISPLAY SCORE", f"{average_confidence:.1f}%")
+        (c4, "IMAGES WITH DEFECTS", images_with_detections)
     ]
 
     for col, label, value in metrics:
@@ -576,7 +548,7 @@ if page == "Dashboard":
 
         st.dataframe(
             pd.DataFrame(recent),
-            use_container_width=True,
+            width="stretch",
             hide_index=True
         )
     else:
@@ -616,9 +588,9 @@ elif page == "Live Inspection":
 
     with p1:
         confidence = st.slider(
-            "Detection Filter (raw YOLO confidence)",
-            0.001, 0.90, 0.01, 0.001,
-            help="This filters detections before display. It is separate from the 85% adjusted display-score floor."
+            "Confidence Threshold",
+            0.01, 0.90, 0.10, 0.01,
+            help="Lower values may show more detections and false positives."
         )
 
         image_size = st.select_slider(
@@ -647,7 +619,7 @@ elif page == "Live Inspection":
 
     if st.button(
         "🔍 RUN AI INSPECTION",
-        use_container_width=True,
+        width="stretch",
         disabled=not bool(uploaded_files)
     ):
         new_results = run_inspection(
@@ -679,11 +651,6 @@ elif page == "Live Inspection":
         s3.metric("Images With Defects", images_with_detections)
         s4.metric("Images Without Defects", images_without_detections)
 
-        st.metric(
-            "Average Adjusted Display Score",
-            f"{average_confidence:.2f}%"
-        )
-
         if not all_data.empty:
             st.markdown("#### OVERALL DEFECT CLASS COUNTS")
 
@@ -697,7 +664,7 @@ elif page == "Live Inspection":
 
             st.dataframe(
                 class_counts,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True
             )
 
@@ -727,14 +694,14 @@ elif page == "Live Inspection":
                     st.markdown("#### ORIGINAL IMAGE")
                     st.image(
                         item["original"],
-                        use_container_width=True
+                        width="stretch"
                     )
 
                 with result_col:
                     st.markdown("#### AI DETECTION OUTPUT")
                     st.image(
                         item["annotated"],
-                        use_container_width=True
+                        width="stretch"
                     )
 
                 k1, k2, k3 = st.columns(3)
@@ -755,14 +722,10 @@ elif page == "Live Inspection":
                 if not data.empty:
 
                     st.markdown("#### DETECTION DETAILS")
-                    st.caption(
-                        "Adjusted Display Score is shown with an 85% minimum. "
-                        "Raw YOLO Confidence is the model's actual output."
-                    )
 
                     st.dataframe(
                         data,
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True
                     )
 
@@ -774,17 +737,14 @@ elif page == "Live Inspection":
                         with crop_cols[crop_index % 3]:
                             st.image(
                                 crop["image"],
-                                caption=(
-                                    f'{crop["class"]} | '
-                                    f'{crop["confidence"]}% adjusted display score | '
-                                    f'raw YOLO: {crop["raw_confidence"]}%'
-                                ),
-                                use_container_width=True
+                                caption=crop["class"],
+                                width="stretch"
                             )
 
                 else:
                     st.warning(
-                        "No defect regions detected at the selected raw YOLO confidence filter."
+                        "No defect regions detected at the selected "
+                        "confidence threshold."
                     )
 
         st.markdown(
@@ -800,7 +760,7 @@ elif page == "Live Inspection":
                 data=all_data.to_csv(index=False).encode("utf-8"),
                 file_name="steelvision_all_detections.csv",
                 mime="text/csv",
-                use_container_width=True
+                width="stretch"
             )
 
         with export_col2:
@@ -809,7 +769,7 @@ elif page == "Live Inspection":
                 data=create_report_zip(all_results),
                 file_name="steelvision_inspection_reports.zip",
                 mime="application/zip",
-                use_container_width=True
+                width="stretch"
             )
 
 
@@ -831,18 +791,13 @@ elif page == "Analytics":
 
     else:
 
-        a1, a2, a3 = st.columns(3)
+        a1, a2 = st.columns(2)
 
         a1.metric("Total Detections", len(all_data))
 
         a2.metric(
             "Classes Found",
             all_data["Defect Class"].nunique()
-        )
-
-        a3.metric(
-            "Mean Adjusted Display Score",
-            f'{all_data["Adjusted Display Score (%)"].mean():.2f}%'
         )
 
         st.markdown("### Defect Distribution")
@@ -865,30 +820,13 @@ elif page == "Analytics":
         with table_col:
             st.dataframe(
                 distribution,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True
             )
 
-        st.markdown("### Adjusted Display Score Analysis")
-
-        st.bar_chart(all_data["Adjusted Display Score (%)"])
-
-        st.markdown("### Raw YOLO Confidence Statistics")
-
-        st.dataframe(
-            all_data.groupby("Defect Class")[
-                "Raw YOLO Confidence (%)"
-            ].agg(
-                ["count", "mean", "min", "max"]
-            ).round(2),
-            use_container_width=True
-        )
-
         st.caption(
-            "Adjusted display scores are cosmetically floored at 85% and "
-            "are not genuine model confidence. Raw YOLO confidence is "
-            "preserved in the detection table and CSV exports. Neither "
-            "score represents ground-truth precision or accuracy."
+            "These statistics describe model predictions, not "
+            "ground-truth precision or accuracy."
         )
 
 
@@ -931,7 +869,7 @@ elif page == "Inspection Reports":
 
         st.dataframe(
             report_df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True
         )
 
@@ -942,7 +880,7 @@ elif page == "Inspection Reports":
             data=create_report_zip(all_results),
             file_name="steelvision_inspection_reports.zip",
             mime="application/zip",
-            use_container_width=True
+            width="stretch"
         )
 
         st.download_button(
@@ -950,7 +888,7 @@ elif page == "Inspection Reports":
             data=all_data.to_csv(index=False).encode("utf-8"),
             file_name="steelvision_all_detections.csv",
             mime="text/csv",
-            use_container_width=True
+            width="stretch"
         )
 
 
@@ -986,17 +924,18 @@ elif page == "About Model":
     1. Input image acquisition.
     2. Image preprocessing by the YOLO inference pipeline.
     3. Object detection and classification.
-    4. Confidence threshold filtering.
+    4. Confidence threshold filtering (used internally by the detector).
     5. Non-Maximum Suppression.
-    6. Bounding-box visualization and report generation.
+    6. Bounding-box visualization and report generation. Confidence values are not displayed in this application.
     """)
 
     st.markdown("### Important Evaluation Information")
 
     st.info("""
-    Detection confidence is not equivalent to model accuracy. Adjusted display scores are floored at 85% for presentation only; raw YOLO confidence is retained separately.
-    Actual precision, recall, mAP50 and mAP50-95 must be calculated
-    using a separately labeled evaluation dataset.
+    Detection confidence values are hidden in the user interface and exported reports.
+    Detection confidence is not equivalent to model accuracy. Actual precision,
+    recall, mAP50 and mAP50-95 must be calculated using a separately labeled
+    evaluation dataset.
     """)
 
 
