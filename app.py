@@ -6,7 +6,6 @@ from pathlib import Path
 from io import BytesIO
 from datetime import datetime
 import pandas as pd
-import numpy as np
 import zipfile
 import time
 
@@ -31,7 +30,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
 
 # --------------------------------------------------
 # CUSTOM STYLING
@@ -146,7 +144,6 @@ hr {
 </style>
 """, unsafe_allow_html=True)
 
-
 # --------------------------------------------------
 # MODEL LOADING
 # --------------------------------------------------
@@ -166,7 +163,6 @@ except Exception as error:
     st.error(f"Model loading failed: {error}")
     st.stop()
 
-
 # --------------------------------------------------
 # SESSION STATE
 # --------------------------------------------------
@@ -176,7 +172,6 @@ if "inspection_results" not in st.session_state:
 
 if "inspection_timestamp" not in st.session_state:
     st.session_state.inspection_timestamp = None
-
 
 # --------------------------------------------------
 # HELPER FUNCTIONS
@@ -216,14 +211,35 @@ def image_to_bytes(image):
     return buffer.getvalue()
 
 
+def create_combined_dataframe(results):
+    combined = []
+
+    for item in results:
+        if not item["dataframe"].empty:
+            temp = item["dataframe"].copy()
+            temp.insert(0, "Image", item["filename"])
+            combined.append(temp)
+
+    columns = [
+        "Image",
+        "Detection ID",
+        "Defect Class",
+        "Confidence (%)",
+        "X1", "Y1", "X2", "Y2"
+    ]
+
+    if combined:
+        return pd.concat(combined, ignore_index=True)
+
+    return pd.DataFrame(columns=columns)
+
+
 def create_report_zip(results):
     buffer = BytesIO()
 
     with zipfile.ZipFile(
         buffer, "w", zipfile.ZIP_DEFLATED
     ) as archive:
-
-        combined = []
 
         for index, item in enumerate(results, start=1):
             prefix = f"inspection_{index}"
@@ -243,31 +259,49 @@ def create_report_zip(results):
                 item["dataframe"].to_csv(index=False)
             )
 
-            for crop_index, crop in enumerate(item["crops"], start=1):
+            for crop_index, crop in enumerate(
+                item["crops"], start=1
+            ):
                 archive.writestr(
                     f"{prefix}/crops/defect_{crop_index}.png",
                     image_to_bytes(crop["image"])
                 )
 
-            if not item["dataframe"].empty:
-                temp = item["dataframe"].copy()
-                temp.insert(0, "Image", item["filename"])
-                combined.append(temp)
+        combined = create_combined_dataframe(results)
 
-        if combined:
-            all_detections = pd.concat(
-                combined, ignore_index=True
-            )
-            archive.writestr(
-                "complete_detection_report.csv",
-                all_detections.to_csv(index=False)
-            )
+        archive.writestr(
+            "complete_detection_report.csv",
+            combined.to_csv(index=False)
+        )
+
+        summary_rows = []
+
+        for item in results:
+            summary_rows.append({
+                "Image": item["filename"],
+                "Defect Regions": len(item["dataframe"]),
+                "Inference Time (s)": round(item["time"], 3),
+                "Resolution": (
+                    f'{item["width"]} × {item["height"]}'
+                )
+            })
+
+        archive.writestr(
+            "inspection_summary.csv",
+            pd.DataFrame(summary_rows).to_csv(index=False)
+        )
 
     buffer.seek(0)
     return buffer.getvalue()
 
 
-def run_inspection(uploaded_files, confidence, iou, image_size, max_det):
+def run_inspection(
+    uploaded_files,
+    confidence,
+    iou,
+    image_size,
+    max_det
+):
     results = []
 
     progress = st.progress(0)
@@ -276,8 +310,8 @@ def run_inspection(uploaded_files, confidence, iou, image_size, max_det):
     for index, uploaded_file in enumerate(uploaded_files):
 
         status.write(
-            f"Inspecting image {index + 1} of {len(uploaded_files)}: "
-            f"{uploaded_file.name}"
+            f"Inspecting image {index + 1} of "
+            f"{len(uploaded_files)}: {uploaded_file.name}"
         )
 
         try:
@@ -346,7 +380,11 @@ def run_inspection(uploaded_files, confidence, iou, image_size, max_det):
 
         progress.progress((index + 1) / len(uploaded_files))
 
-    status.success("Inspection completed.")
+    status.success(
+        f"Inspection completed: {len(results)} of "
+        f"{len(uploaded_files)} image(s) processed."
+    )
+
     return results
 
 
@@ -413,23 +451,21 @@ total_defects = sum(
     len(item["dataframe"]) for item in all_results
 )
 
-all_frames = [
-    item["dataframe"]
-    for item in all_results
+images_with_detections = sum(
+    1 for item in all_results
     if not item["dataframe"].empty
-]
+)
 
-if all_frames:
-    all_data = pd.concat(all_frames, ignore_index=True)
-else:
-    all_data = pd.DataFrame(
-        columns=[
-            "Detection ID", "Defect Class",
-            "Confidence (%)", "X1", "Y1", "X2", "Y2"
-        ]
-    )
+images_without_detections = (
+    total_images - images_with_detections
+)
 
-unique_classes = all_data["Defect Class"].nunique()
+all_data = create_combined_dataframe(all_results)
+
+unique_classes = (
+    all_data["Defect Class"].nunique()
+    if not all_data.empty else 0
+)
 
 average_confidence = (
     all_data["Confidence (%)"].mean()
@@ -515,7 +551,9 @@ if page == "Dashboard":
                 "Image": item["filename"],
                 "Defect Regions": len(item["dataframe"]),
                 "Inference Time (s)": round(item["time"], 3),
-                "Resolution": f'{item["width"]} × {item["height"]}'
+                "Resolution": (
+                    f'{item["width"]} × {item["height"]}'
+                )
             })
 
         st.dataframe(
@@ -612,100 +650,144 @@ elif page == "Live Inspection":
     if all_results:
 
         st.markdown(
-            '<div class="section-title">04 / INSPECTION RESULTS</div>',
+            '<div class="section-title">04 / BATCH INSPECTION SUMMARY</div>',
             unsafe_allow_html=True
         )
 
-        selected_name = st.selectbox(
-            "Select an inspected image",
-            [item["filename"] for item in all_results]
+        s1, s2, s3, s4 = st.columns(4)
+
+        s1.metric("Images Processed", total_images)
+        s2.metric("Total Defect Regions", total_defects)
+        s3.metric("Images With Defects", images_with_detections)
+        s4.metric("Images Without Defects", images_without_detections)
+
+        st.metric(
+            "Average Detection Confidence",
+            f"{average_confidence:.2f}%"
         )
 
-        selected = next(
-            item for item in all_results
-            if item["filename"] == selected_name
-        )
+        if not all_data.empty:
+            st.markdown("#### OVERALL DEFECT CLASS COUNTS")
 
-        original_col, result_col = st.columns(2)
-
-        with original_col:
-            st.markdown("#### ORIGINAL IMAGE")
-            st.image(
-                selected["original"],
-                use_container_width=True
+            class_counts = (
+                all_data["Defect Class"]
+                .value_counts()
+                .reindex(CLASS_NAMES, fill_value=0)
+                .rename_axis("Defect Class")
+                .reset_index(name="Detections")
             )
-
-        with result_col:
-            st.markdown("#### AI DETECTION OUTPUT")
-            st.image(
-                selected["annotated"],
-                use_container_width=True
-            )
-
-        data = selected["dataframe"]
-
-        k1, k2, k3 = st.columns(3)
-
-        k1.metric("Defect Regions", len(data))
-        k2.metric(
-            "Unique Classes",
-            data["Defect Class"].nunique() if not data.empty else 0
-        )
-        k3.metric(
-            "Inference Time",
-            f'{selected["time"]:.3f} s'
-        )
-
-        if not data.empty:
-
-            st.markdown("#### DETECTION DETAILS")
 
             st.dataframe(
-                data,
+                class_counts,
                 use_container_width=True,
                 hide_index=True
             )
 
-            st.markdown("#### INDIVIDUAL DEFECT CROPS")
+        st.markdown(
+            '<div class="section-title">05 / ALL IMAGE RESULTS</div>',
+            unsafe_allow_html=True
+        )
 
-            crop_options = [
-                f'{index + 1}. {crop["class"]} — '
-                f'{crop["confidence"]}%'
-                for index, crop in enumerate(selected["crops"])
-            ]
+        st.caption(
+            "Each uploaded image is shown separately below, "
+            "including all detections and localization results."
+        )
 
-            selected_crop = st.selectbox(
-                "Select a detection",
-                crop_options
+        for index, item in enumerate(all_results, start=1):
+
+            data = item["dataframe"]
+
+            with st.expander(
+                f"Image {index}: {item['filename']} — "
+                f"{len(data)} defect region(s)",
+                expanded=True
+            ):
+
+                original_col, result_col = st.columns(2)
+
+                with original_col:
+                    st.markdown("#### ORIGINAL IMAGE")
+                    st.image(
+                        item["original"],
+                        use_container_width=True
+                    )
+
+                with result_col:
+                    st.markdown("#### AI DETECTION OUTPUT")
+                    st.image(
+                        item["annotated"],
+                        use_container_width=True
+                    )
+
+                k1, k2, k3 = st.columns(3)
+
+                k1.metric("Defect Regions", len(data))
+
+                k2.metric(
+                    "Unique Classes",
+                    data["Defect Class"].nunique()
+                    if not data.empty else 0
+                )
+
+                k3.metric(
+                    "Inference Time",
+                    f'{item["time"]:.3f} s'
+                )
+
+                if not data.empty:
+
+                    st.markdown("#### DETECTION DETAILS")
+
+                    st.dataframe(
+                        data,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    st.markdown("#### INDIVIDUAL DEFECT CROPS")
+
+                    crop_cols = st.columns(3)
+
+                    for crop_index, crop in enumerate(item["crops"]):
+                        with crop_cols[crop_index % 3]:
+                            st.image(
+                                crop["image"],
+                                caption=(
+                                    f'{crop["class"]} | '
+                                    f'{crop["confidence"]}% confidence'
+                                ),
+                                use_container_width=True
+                            )
+
+                else:
+                    st.warning(
+                        "No defect regions detected at the selected "
+                        "confidence threshold."
+                    )
+
+        st.markdown(
+            '<div class="section-title">06 / BATCH EXPORT</div>',
+            unsafe_allow_html=True
+        )
+
+        export_col1, export_col2 = st.columns(2)
+
+        with export_col1:
+            st.download_button(
+                "⬇ DOWNLOAD COMBINED CSV",
+                data=all_data.to_csv(index=False).encode("utf-8"),
+                file_name="steelvision_all_detections.csv",
+                mime="text/csv",
+                use_container_width=True
             )
 
-            crop_index = crop_options.index(selected_crop)
-            crop = selected["crops"][crop_index]
-
-            crop_col, info_col = st.columns([1, 1])
-
-            with crop_col:
-                st.image(
-                    crop["image"],
-                    caption="Individual detected region",
-                    use_container_width=True
-                )
-
-            with info_col:
-                st.metric("Predicted Class", crop["class"])
-                st.metric(
-                    "Confidence",
-                    f'{crop["confidence"]}%'
-                )
-
-                st.caption(
-                    "This crop is extracted from the predicted bounding box."
-                )
-
-        else:
-            st.warning(
-                "No defect regions detected. Try adjusting the "
-                "confidence threshold or uploading another image."
+        with export_col2:
+            st.download_button(
+                "⬇ DOWNLOAD COMPLETE INSPECTION ZIP",
+                data=create_report_zip(all_results),
+                file_name="steelvision_inspection_reports.zip",
+                mime="application/zip",
+                use_container_width=True
             )
 
 
@@ -730,10 +812,12 @@ elif page == "Analytics":
         a1, a2, a3 = st.columns(3)
 
         a1.metric("Total Detections", len(all_data))
+
         a2.metric(
             "Classes Found",
             all_data["Defect Class"].nunique()
         )
+
         a3.metric(
             "Mean Confidence",
             f'{all_data["Confidence (%)"].mean():.2f}%'
@@ -816,7 +900,9 @@ elif page == "Inspection Reports":
                 "Image": item["filename"],
                 "Defect Regions": len(item["dataframe"]),
                 "Inference Time (s)": round(item["time"], 3),
-                "Resolution": f'{item["width"]} × {item["height"]}'
+                "Resolution": (
+                    f'{item["width"]} × {item["height"]}'
+                )
             })
 
         report_df = pd.DataFrame(report_rows)
@@ -837,14 +923,13 @@ elif page == "Inspection Reports":
             use_container_width=True
         )
 
-        if not all_data.empty:
-            st.download_button(
-                "⬇ DOWNLOAD ALL DETECTIONS CSV",
-                data=all_data.to_csv(index=False).encode("utf-8"),
-                file_name="steelvision_all_detections.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+        st.download_button(
+            "⬇ DOWNLOAD ALL DETECTIONS CSV",
+            data=all_data.to_csv(index=False).encode("utf-8"),
+            file_name="steelvision_all_detections.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 
 
 # --------------------------------------------------
