@@ -182,12 +182,13 @@ def create_detection_dataframe(result, model_names):
 
     for index, box in enumerate(result.boxes, start=1):
         class_id = int(box.cls.item())
+        confidence = float(box.conf.item()) * 100
         coordinates = box.xyxy[0].tolist()
 
         rows.append({
             "Detection ID": index,
             "Defect Class": model_names[class_id],
-            "Confidence (%)": round(float(box.conf.item()) * 100, 1),
+            "Confidence (%)": round(confidence, 2),
             "X1": round(coordinates[0], 1),
             "Y1": round(coordinates[1], 1),
             "X2": round(coordinates[2], 1),
@@ -332,7 +333,7 @@ def run_inspection(
             elapsed = time.perf_counter() - start_time
 
             annotated = Image.fromarray(
-                prediction.plot(conf=True)[..., ::-1]
+                prediction.plot()[..., ::-1]
             )
 
             dataframe = create_detection_dataframe(
@@ -353,10 +354,12 @@ def run_inspection(
                     crop = image.crop((x1, y1, x2, y2))
 
                     class_id = int(box.cls.item())
+                    score = float(box.conf.item()) * 100
 
                     crops.append({
                         "image": crop,
-                        "class": model.names[class_id]
+                        "class": model.names[class_id],
+                        "confidence": round(score, 2)
                     })
 
             results.append({
@@ -464,6 +467,10 @@ unique_classes = (
     if not all_data.empty else 0
 )
 
+average_confidence = (
+    all_data["Confidence (%)"].mean()
+    if not all_data.empty else 0
+)
 
 
 # --------------------------------------------------
@@ -483,7 +490,7 @@ if page == "Dashboard":
         (c1, "IMAGES INSPECTED", total_images),
         (c2, "DEFECT REGIONS", total_defects),
         (c3, "DEFECT CLASSES", unique_classes),
-        (c4, "IMAGES WITH DEFECTS", images_with_detections)
+        (c4, "AVG CONFIDENCE", f"{average_confidence:.1f}%")
     ]
 
     for col, label, value in metrics:
@@ -551,7 +558,7 @@ if page == "Dashboard":
 
         st.dataframe(
             pd.DataFrame(recent),
-            width="stretch",
+            use_container_width=True,
             hide_index=True
         )
     else:
@@ -622,7 +629,7 @@ elif page == "Live Inspection":
 
     if st.button(
         "🔍 RUN AI INSPECTION",
-        width="stretch",
+        use_container_width=True,
         disabled=not bool(uploaded_files)
     ):
         new_results = run_inspection(
@@ -654,6 +661,11 @@ elif page == "Live Inspection":
         s3.metric("Images With Defects", images_with_detections)
         s4.metric("Images Without Defects", images_without_detections)
 
+        st.metric(
+            "Average Detection Confidence",
+            f"{average_confidence:.2f}%"
+        )
+
         if not all_data.empty:
             st.markdown("#### OVERALL DEFECT CLASS COUNTS")
 
@@ -667,7 +679,7 @@ elif page == "Live Inspection":
 
             st.dataframe(
                 class_counts,
-                width="stretch",
+                use_container_width=True,
                 hide_index=True
             )
 
@@ -697,14 +709,14 @@ elif page == "Live Inspection":
                     st.markdown("#### ORIGINAL IMAGE")
                     st.image(
                         item["original"],
-                        width="stretch"
+                        use_container_width=True
                     )
 
                 with result_col:
                     st.markdown("#### AI DETECTION OUTPUT")
                     st.image(
                         item["annotated"],
-                        width="stretch"
+                        use_container_width=True
                     )
 
                 k1, k2, k3 = st.columns(3)
@@ -728,7 +740,7 @@ elif page == "Live Inspection":
 
                     st.dataframe(
                         data,
-                        width="stretch",
+                        use_container_width=True,
                         hide_index=True
                     )
 
@@ -740,8 +752,11 @@ elif page == "Live Inspection":
                         with crop_cols[crop_index % 3]:
                             st.image(
                                 crop["image"],
-                                caption=crop["class"],
-                                width="stretch"
+                                caption=(
+                                    f'{crop["class"]} | '
+                                    f'{crop["confidence"]}% confidence'
+                                ),
+                                use_container_width=True
                             )
 
                 else:
@@ -763,7 +778,7 @@ elif page == "Live Inspection":
                 data=all_data.to_csv(index=False).encode("utf-8"),
                 file_name="steelvision_all_detections.csv",
                 mime="text/csv",
-                width="stretch"
+                use_container_width=True
             )
 
         with export_col2:
@@ -772,7 +787,7 @@ elif page == "Live Inspection":
                 data=create_report_zip(all_results),
                 file_name="steelvision_inspection_reports.zip",
                 mime="application/zip",
-                width="stretch"
+                use_container_width=True
             )
 
 
@@ -794,13 +809,18 @@ elif page == "Analytics":
 
     else:
 
-        a1, a2 = st.columns(2)
+        a1, a2, a3 = st.columns(3)
 
         a1.metric("Total Detections", len(all_data))
 
         a2.metric(
             "Classes Found",
             all_data["Defect Class"].nunique()
+        )
+
+        a3.metric(
+            "Mean Confidence",
+            f'{all_data["Confidence (%)"].mean():.2f}%'
         )
 
         st.markdown("### Defect Distribution")
@@ -823,9 +843,26 @@ elif page == "Analytics":
         with table_col:
             st.dataframe(
                 distribution,
-                width="stretch",
+                use_container_width=True,
                 hide_index=True
             )
+
+        st.markdown("### Confidence Analysis")
+
+        st.bar_chart(
+            all_data["Confidence (%)"]
+        )
+
+        st.markdown("### Confidence Statistics")
+
+        st.dataframe(
+            all_data.groupby("Defect Class")[
+                "Confidence (%)"
+            ].agg(
+                ["count", "mean", "min", "max"]
+            ).round(2),
+            use_container_width=True
+        )
 
         st.caption(
             "These statistics describe model predictions, not "
@@ -872,7 +909,7 @@ elif page == "Inspection Reports":
 
         st.dataframe(
             report_df,
-            width="stretch",
+            use_container_width=True,
             hide_index=True
         )
 
@@ -883,7 +920,7 @@ elif page == "Inspection Reports":
             data=create_report_zip(all_results),
             file_name="steelvision_inspection_reports.zip",
             mime="application/zip",
-            width="stretch"
+            use_container_width=True
         )
 
         st.download_button(
@@ -891,7 +928,7 @@ elif page == "Inspection Reports":
             data=all_data.to_csv(index=False).encode("utf-8"),
             file_name="steelvision_all_detections.csv",
             mime="text/csv",
-            width="stretch"
+            use_container_width=True
         )
 
 
@@ -927,18 +964,17 @@ elif page == "About Model":
     1. Input image acquisition.
     2. Image preprocessing by the YOLO inference pipeline.
     3. Object detection and classification.
-    4. Confidence threshold filtering (used internally by the detector).
+    4. Confidence threshold filtering.
     5. Non-Maximum Suppression.
-    6. Bounding-box visualization and report generation. Detection confidence is shown as the model's raw score, as a percentage.
+    6. Bounding-box visualization and report generation.
     """)
 
     st.markdown("### Important Evaluation Information")
 
     st.info("""
-    Detection confidence values shown in the interface and exported reports are the model's raw scores, converted to percentages.
-    Detection confidence is not equivalent to model accuracy. Actual precision,
-    recall, mAP50 and mAP50-95 must be calculated using a separately labeled
-    evaluation dataset.
+    Detection confidence is not equivalent to model accuracy.
+    Actual precision, recall, mAP50 and mAP50-95 must be calculated
+    using a separately labeled evaluation dataset.
     """)
 
 
