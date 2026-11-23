@@ -4,108 +4,152 @@ from ultralytics import YOLO
 from PIL import Image
 from pathlib import Path
 from io import BytesIO
+from datetime import datetime
 import pandas as pd
+import numpy as np
+import zipfile
+import time
+
+# --------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------
 
 MODEL_PATH = Path(__file__).parent / "best.pt"
 
+CLASS_NAMES = [
+    "crazing",
+    "inclusion",
+    "patches",
+    "pitted_surface",
+    "rolled_in_scale",
+    "scratches"
+]
+
 st.set_page_config(
-    page_title="STEELVISION AI | Inspection",
+    page_title="STEELVISION AI | Industrial Intelligence",
     page_icon="🔍",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+
+# --------------------------------------------------
+# CUSTOM STYLING
+# --------------------------------------------------
 
 st.markdown("""
 <style>
 .stApp {
-    background: #0b1120;
-    color: #e5edf7;
+    background: #09111f;
+    color: #e6edf7;
 }
 [data-testid="stSidebar"] {
-    background: #111b2d;
-    border-right: 1px solid #25344a;
+    background: #101b2c;
+    border-right: 1px solid #263b52;
 }
 .block-container {
-    padding-top: 2rem;
+    max-width: 1500px;
+    padding-top: 1.5rem;
     padding-bottom: 3rem;
-    max-width: 1450px;
 }
 .hero {
-    background: linear-gradient(120deg, #14283b, #102b35);
-    border: 1px solid #245166;
-    padding: 27px;
-    border-radius: 16px;
-    margin-bottom: 24px;
+    background: linear-gradient(120deg, #122b40, #123c48);
+    border: 1px solid #286176;
+    border-radius: 18px;
+    padding: 28px;
+    margin-bottom: 25px;
 }
 .hero h1 {
-    color: #f1f7ff;
-    font-size: 32px;
-    margin-bottom: 5px;
+    font-size: 34px;
+    color: #f3f8ff;
+    margin: 0;
+    letter-spacing: 1px;
 }
 .hero p {
-    color: #9db5c9;
-    margin-bottom: 0;
+    color: #a7c1d3;
+    margin: 7px 0 0 0;
 }
 .section-title {
-    color: #e6f2ff;
+    color: #eaf3ff;
     font-size: 21px;
     font-weight: 700;
-    margin-top: 22px;
-    margin-bottom: 12px;
+    margin: 25px 0 14px 0;
 }
 .metric-card {
-    background: #142136;
-    border: 1px solid #293d56;
+    background: #142238;
+    border: 1px solid #2a405b;
     border-radius: 13px;
     padding: 17px;
     min-height: 112px;
 }
 .metric-label {
-    color: #93a9c1;
-    font-size: 13px;
+    color: #9aafc6;
+    font-size: 12px;
+    font-weight: 600;
 }
 .metric-value {
-    color: #4dd8df;
+    color: #54d8df;
     font-size: 29px;
     font-weight: 750;
-    margin-top: 9px;
+    margin-top: 8px;
 }
 .metric-note {
-    color: #8298ae;
-    font-size: 12px;
+    color: #8ca3b9;
+    font-size: 11px;
+    margin-top: 4px;
 }
 .panel {
-    background: #111d30;
-    border: 1px solid #293d56;
+    background: #111e31;
+    border: 1px solid #293f59;
     border-radius: 14px;
     padding: 17px;
 }
-.small-note {
-    color: #91a8bf;
+.info-text {
+    color: #9aafc6;
     font-size: 13px;
 }
-div.stButton > button, div.stDownloadButton > button {
-    border-radius: 9px;
-    border: 1px solid #2a8495;
-    background: #123c4b;
-    color: white;
+.status {
+    display: inline-block;
+    background: #123e36;
+    color: #70e5b1;
+    border: 1px solid #26765c;
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-size: 12px;
 }
-div.stButton > button:hover, div.stDownloadButton > button:hover {
+div.stButton > button,
+div.stDownloadButton > button {
+    background: #124455;
+    color: white;
+    border: 1px solid #347b8d;
+    border-radius: 9px;
+    font-weight: 600;
+}
+div.stButton > button:hover,
+div.stDownloadButton > button:hover {
     background: #1b6070;
     color: white;
-    border-color: #4dd8df;
+    border-color: #54d8df;
 }
 [data-testid="stFileUploader"] {
-    background: #111d30;
-    border: 1px dashed #34748a;
+    background: #111e31;
+    border: 1px dashed #347b8d;
     border-radius: 12px;
     padding: 12px;
 }
 h2, h3 {
-    color: #e6f2ff;
+    color: #e6f3ff;
+}
+hr {
+    border-color: #263b52;
 }
 </style>
 """, unsafe_allow_html=True)
 
+
+# --------------------------------------------------
+# MODEL LOADING
+# --------------------------------------------------
 
 @st.cache_resource
 def load_model():
@@ -119,301 +163,746 @@ def load_model():
 try:
     model = load_model()
 except Exception as error:
-    st.error(f"Unable to load the detection model: {error}")
+    st.error(f"Model loading failed: {error}")
     st.stop()
 
 
-# Sidebar
+# --------------------------------------------------
+# SESSION STATE
+# --------------------------------------------------
+
+if "inspection_results" not in st.session_state:
+    st.session_state.inspection_results = []
+
+if "inspection_timestamp" not in st.session_state:
+    st.session_state.inspection_timestamp = None
+
+
+# --------------------------------------------------
+# HELPER FUNCTIONS
+# --------------------------------------------------
+
+def create_detection_dataframe(result, model_names):
+    rows = []
+
+    for index, box in enumerate(result.boxes, start=1):
+        class_id = int(box.cls.item())
+        confidence = float(box.conf.item()) * 100
+        coordinates = box.xyxy[0].tolist()
+
+        rows.append({
+            "Detection ID": index,
+            "Defect Class": model_names[class_id],
+            "Confidence (%)": round(confidence, 2),
+            "X1": round(coordinates[0], 1),
+            "Y1": round(coordinates[1], 1),
+            "X2": round(coordinates[2], 1),
+            "Y2": round(coordinates[3], 1)
+        })
+
+    columns = [
+        "Detection ID",
+        "Defect Class",
+        "Confidence (%)",
+        "X1", "Y1", "X2", "Y2"
+    ]
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def image_to_bytes(image):
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def create_report_zip(results):
+    buffer = BytesIO()
+
+    with zipfile.ZipFile(
+        buffer, "w", zipfile.ZIP_DEFLATED
+    ) as archive:
+
+        combined = []
+
+        for index, item in enumerate(results, start=1):
+            prefix = f"inspection_{index}"
+
+            archive.writestr(
+                f"{prefix}/original.png",
+                image_to_bytes(item["original"])
+            )
+
+            archive.writestr(
+                f"{prefix}/annotated.png",
+                image_to_bytes(item["annotated"])
+            )
+
+            archive.writestr(
+                f"{prefix}/detections.csv",
+                item["dataframe"].to_csv(index=False)
+            )
+
+            for crop_index, crop in enumerate(item["crops"], start=1):
+                archive.writestr(
+                    f"{prefix}/crops/defect_{crop_index}.png",
+                    image_to_bytes(crop["image"])
+                )
+
+            if not item["dataframe"].empty:
+                temp = item["dataframe"].copy()
+                temp.insert(0, "Image", item["filename"])
+                combined.append(temp)
+
+        if combined:
+            all_detections = pd.concat(
+                combined, ignore_index=True
+            )
+            archive.writestr(
+                "complete_detection_report.csv",
+                all_detections.to_csv(index=False)
+            )
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def run_inspection(uploaded_files, confidence, iou, image_size, max_det):
+    results = []
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    for index, uploaded_file in enumerate(uploaded_files):
+
+        status.write(
+            f"Inspecting image {index + 1} of {len(uploaded_files)}: "
+            f"{uploaded_file.name}"
+        )
+
+        try:
+            image = Image.open(uploaded_file).convert("RGB")
+            width, height = image.size
+
+            start_time = time.perf_counter()
+
+            prediction = model.predict(
+                source=image,
+                conf=confidence,
+                iou=iou,
+                imgsz=image_size,
+                max_det=max_det,
+                device="cpu",
+                verbose=False
+            )[0]
+
+            elapsed = time.perf_counter() - start_time
+
+            annotated = Image.fromarray(
+                prediction.plot()[..., ::-1]
+            )
+
+            dataframe = create_detection_dataframe(
+                prediction, model.names
+            )
+
+            crops = []
+
+            for box in prediction.boxes:
+                coords = box.xyxy[0].tolist()
+
+                x1 = max(0, int(coords[0]))
+                y1 = max(0, int(coords[1]))
+                x2 = min(width, int(coords[2]))
+                y2 = min(height, int(coords[3]))
+
+                if x2 > x1 and y2 > y1:
+                    crop = image.crop((x1, y1, x2, y2))
+
+                    class_id = int(box.cls.item())
+                    score = float(box.conf.item()) * 100
+
+                    crops.append({
+                        "image": crop,
+                        "class": model.names[class_id],
+                        "confidence": round(score, 2)
+                    })
+
+            results.append({
+                "filename": uploaded_file.name,
+                "original": image,
+                "annotated": annotated,
+                "dataframe": dataframe,
+                "crops": crops,
+                "time": elapsed,
+                "width": width,
+                "height": height
+            })
+
+        except Exception as error:
+            st.error(
+                f"Could not process {uploaded_file.name}: {error}"
+            )
+
+        progress.progress((index + 1) / len(uploaded_files))
+
+    status.success("Inspection completed.")
+    return results
+
+
+# --------------------------------------------------
+# SIDEBAR
+# --------------------------------------------------
+
 st.sidebar.markdown("## 🔍 STEELVISION AI")
-st.sidebar.caption("Industrial Inspection Console")
+st.sidebar.caption("INDUSTRIAL INTELLIGENCE PLATFORM")
 st.sidebar.divider()
 
-st.sidebar.markdown("### Inspection Settings")
-
-confidence = st.sidebar.slider(
-    "Confidence Threshold",
-    min_value=0.01,
-    max_value=0.90,
-    value=0.10,
-    step=0.01,
-    help="Lower values show more possible detections, including weaker predictions."
-)
-
-iou = st.sidebar.slider(
-    "NMS IoU Threshold",
-    min_value=0.10,
-    max_value=0.95,
-    value=0.70,
-    step=0.05
-)
-
-image_size = st.sidebar.select_slider(
-    "Inference Image Size",
-    options=[416, 512, 640, 768, 960],
-    value=640
-)
-
-max_detections = st.sidebar.select_slider(
-    "Maximum Detections",
-    options=[50, 100, 200, 300, 500],
-    value=300
+page = st.sidebar.radio(
+    "NAVIGATION",
+    [
+        "Dashboard",
+        "Live Inspection",
+        "Analytics",
+        "Inspection Reports",
+        "About Model"
+    ]
 )
 
 st.sidebar.divider()
-st.sidebar.markdown("### Supported Defect Classes")
+st.sidebar.markdown("### MODEL INFORMATION")
+st.sidebar.markdown("**Architecture:** YOLO11n")
+st.sidebar.markdown("**Framework:** Ultralytics")
+st.sidebar.markdown("**Inference:** CPU")
+st.sidebar.markdown("**Classes:** 6")
 
-class_names = [
-    "crazing",
-    "inclusion",
-    "patches",
-    "pitted_surface",
-    "rolled_in_scale",
-    "scratches"
-]
-
-for name in class_names:
-    st.sidebar.markdown(f"• `{name}`")
+st.sidebar.markdown(
+    '<span class="status">● MODEL LOADED</span>',
+    unsafe_allow_html=True
+)
 
 st.sidebar.divider()
-st.sidebar.caption("Model: Custom-trained YOLO11n")
-st.sidebar.caption("Inference: CPU")
+st.sidebar.caption("STEELVISION AI | Deep Learning Inspection")
 
 
-# Main header
+# --------------------------------------------------
+# HEADER
+# --------------------------------------------------
+
 st.markdown("""
 <div class="hero">
     <h1>STEELVISION AI</h1>
-    <p>Intelligent Steel Surface Inspection & Defect Classification</p>
-    <p>Automated visual inspection powered by deep learning and YOLO.</p>
+    <p>INTELLIGENT STEEL SURFACE INSPECTION SYSTEM</p>
+    <p>
+        Detect. Classify. Analyze. Improve industrial quality inspection
+        through deep learning and computer vision.
+    </p>
 </div>
 """, unsafe_allow_html=True)
 
 
-# Upload section
-st.markdown('<div class="section-title">01 / Image Inspection</div>',
-            unsafe_allow_html=True)
+# --------------------------------------------------
+# GLOBAL METRICS
+# --------------------------------------------------
 
-uploaded_file = st.file_uploader(
-    "Upload a steel surface image",
-    type=["jpg", "jpeg", "png"],
-    help="Upload a JPG, JPEG or PNG image for defect inspection."
+all_results = st.session_state.inspection_results
+
+total_images = len(all_results)
+
+total_defects = sum(
+    len(item["dataframe"]) for item in all_results
 )
 
-if uploaded_file is None:
-    st.markdown("""
-    <div class="panel">
-        <h3>Ready for Inspection</h3>
-        <p class="small-note">
-        Upload a steel surface image to start automated defect detection.
-        The system will identify possible defect regions, classify them
-        and generate an inspection summary.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("### Inspection workflow")
-    c1, c2, c3 = st.columns(3)
-
-    c1.info("**01 — Upload**\n\nSelect a steel surface image.")
-    c2.info("**02 — Detect**\n\nYOLO identifies potential defect regions.")
-    c3.info("**03 — Analyze**\n\nReview detections and export results.")
-
-    st.stop()
-
-
-# Load image
-try:
-    image = Image.open(uploaded_file).convert("RGB")
-except Exception:
-    st.error("The uploaded file could not be opened as an image.")
-    st.stop()
-
-width, height = image.size
-
-st.markdown(
-    f'<p class="small-note">Image: {uploaded_file.name} | '
-    f'Resolution: {width} × {height} pixels</p>',
-    unsafe_allow_html=True
-)
-
-
-# Prediction
-with st.spinner("Analyzing steel surface and detecting defects..."):
-    try:
-        result = model.predict(
-            source=image,
-            conf=confidence,
-            iou=iou,
-            imgsz=image_size,
-            max_det=max_detections,
-            device="cpu",
-            verbose=False
-        )[0]
-    except Exception as error:
-        st.error(f"Prediction failed: {error}")
-        st.stop()
-
-
-# Process predictions
-rows = []
-
-for box in result.boxes:
-    class_id = int(box.cls.item())
-    score = float(box.conf.item())
-    xyxy = box.xyxy[0].tolist()
-
-    rows.append({
-        "Defect Class": model.names[class_id],
-        "Confidence (%)": round(score * 100, 2),
-        "X1": round(xyxy[0], 1),
-        "Y1": round(xyxy[1], 1),
-        "X2": round(xyxy[2], 1),
-        "Y2": round(xyxy[3], 1)
-    })
-
-df = pd.DataFrame(rows)
-
-total = len(df)
-unique_classes = df["Defect Class"].nunique() if total else 0
-average_confidence = (
-    df["Confidence (%)"].mean() if total else 0
-)
-
-annotated_array = result.plot()[..., ::-1]
-annotated_image = Image.fromarray(annotated_array)
-
-
-# Metrics
-st.markdown(
-    '<div class="section-title">02 / Inspection Overview</div>',
-    unsafe_allow_html=True
-)
-
-m1, m2, m3, m4 = st.columns(4)
-
-metrics = [
-    (m1, "TOTAL DEFECTS", total, "Detected regions"),
-    (m2, "DEFECT CLASSES", unique_classes, "Unique categories"),
-    (m3, "AVG CONFIDENCE", f"{average_confidence:.1f}%", "Mean model confidence"),
-    (m4, "IMAGE RESOLUTION", f"{width}×{height}", "Width × height")
+all_frames = [
+    item["dataframe"]
+    for item in all_results
+    if not item["dataframe"].empty
 ]
 
-for column, label, value, note in metrics:
-    with column:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">{label}</div>
-            <div class="metric-value">{value}</div>
-            <div class="metric-note">{note}</div>
+if all_frames:
+    all_data = pd.concat(all_frames, ignore_index=True)
+else:
+    all_data = pd.DataFrame(
+        columns=[
+            "Detection ID", "Defect Class",
+            "Confidence (%)", "X1", "Y1", "X2", "Y2"
+        ]
+    )
+
+unique_classes = all_data["Defect Class"].nunique()
+
+average_confidence = (
+    all_data["Confidence (%)"].mean()
+    if not all_data.empty else 0
+)
+
+
+# --------------------------------------------------
+# DASHBOARD
+# --------------------------------------------------
+
+if page == "Dashboard":
+
+    st.markdown(
+        '<div class="section-title">01 / SYSTEM OVERVIEW</div>',
+        unsafe_allow_html=True
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    metrics = [
+        (c1, "IMAGES INSPECTED", total_images),
+        (c2, "DEFECT REGIONS", total_defects),
+        (c3, "DEFECT CLASSES", unique_classes),
+        (c4, "AVG CONFIDENCE", f"{average_confidence:.1f}%")
+    ]
+
+    for col, label, value in metrics:
+        with col:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-label">{label}</div>
+                <div class="metric-value">{value}</div>
+                <div class="metric-note">Current session</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="section-title">02 / INSPECTION WORKSPACE</div>',
+        unsafe_allow_html=True
+    )
+
+    left, right = st.columns([1.4, 1])
+
+    with left:
+        st.markdown("""
+        <div class="panel">
+            <h3>AI Inspection Engine</h3>
+            <p class="info-text">
+            Analyze steel surface images using a custom-trained
+            YOLO11n object detection model.
+            </p>
+            <p>✓ Multiple defect region detection</p>
+            <p>✓ Six defect categories</p>
+            <p>✓ Confidence-based predictions</p>
+            <p>✓ Annotated inspection results</p>
+            </div>
+        """, unsafe_allow_html=True)
+
+    with right:
+        st.markdown("""
+        <div class="panel">
+            <h3>Supported Defect Categories</h3>
+            <p>01 · Crazing</p>
+            <p>02 · Inclusion</p>
+            <p>03 · Patches</p>
+            <p>04 · Pitted Surface</p>
+            <p>05 · Rolled-in Scale</p>
+            <p>06 · Scratches</p>
         </div>
         """, unsafe_allow_html=True)
 
-
-# Image comparison
-st.markdown(
-    '<div class="section-title">03 / Visual Inspection</div>',
-    unsafe_allow_html=True
-)
-
-original_col, detected_col = st.columns(2)
-
-with original_col:
-    st.markdown("#### Original Image")
-    st.image(image, use_container_width=True)
-
-with detected_col:
-    st.markdown("#### AI Detection Output")
-    st.image(annotated_image, use_container_width=True)
-
-
-# Analytics
-st.markdown(
-    '<div class="section-title">04 / Defect Analytics</div>',
-    unsafe_allow_html=True
-)
-
-if total > 0:
-    chart_col, detail_col = st.columns([1, 1])
-
-    class_summary = (
-        df.groupby("Defect Class")
-        .size()
-        .reset_index(name="Detections")
-        .sort_values("Detections", ascending=False)
+    st.markdown(
+        '<div class="section-title">03 / RECENT INSPECTIONS</div>',
+        unsafe_allow_html=True
     )
 
-    with chart_col:
-        st.markdown("#### Defects by Category")
-        st.bar_chart(
-            class_summary.set_index("Defect Class"),
-            y="Detections"
+    if all_results:
+        recent = []
+
+        for item in all_results:
+            recent.append({
+                "Image": item["filename"],
+                "Defect Regions": len(item["dataframe"]),
+                "Inference Time (s)": round(item["time"], 3),
+                "Resolution": f'{item["width"]} × {item["height"]}'
+            })
+
+        st.dataframe(
+            pd.DataFrame(recent),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info(
+            "No inspections yet. Open Live Inspection to begin."
         )
 
-    with detail_col:
-        st.markdown("#### Class-wise Summary")
+
+# --------------------------------------------------
+# LIVE INSPECTION
+# --------------------------------------------------
+
+elif page == "Live Inspection":
+
+    st.markdown(
+        '<div class="section-title">01 / IMAGE ACQUISITION</div>',
+        unsafe_allow_html=True
+    )
+
+    uploaded_files = st.file_uploader(
+        "Upload steel surface images",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True
+    )
+
+    if uploaded_files:
+        st.success(
+            f"{len(uploaded_files)} image(s) selected."
+        )
+
+    st.markdown(
+        '<div class="section-title">02 / DETECTION PARAMETERS</div>',
+        unsafe_allow_html=True
+    )
+
+    p1, p2 = st.columns(2)
+
+    with p1:
+        confidence = st.slider(
+            "Confidence Threshold",
+            0.01, 0.90, 0.10, 0.01,
+            help="Lower values may show more detections and false positives."
+        )
+
+        image_size = st.select_slider(
+            "Inference Image Size",
+            options=[416, 512, 640, 768, 960],
+            value=640
+        )
+
+    with p2:
+        iou = st.slider(
+            "NMS IoU Threshold",
+            0.10, 0.95, 0.70, 0.05,
+            help="Controls suppression of overlapping predicted boxes."
+        )
+
+        max_det = st.select_slider(
+            "Maximum Detections Per Image",
+            options=[50, 100, 200, 300, 500],
+            value=300
+        )
+
+    st.markdown(
+        '<div class="section-title">03 / EXECUTE INSPECTION</div>',
+        unsafe_allow_html=True
+    )
+
+    if st.button(
+        "🔍 RUN AI INSPECTION",
+        use_container_width=True,
+        disabled=not bool(uploaded_files)
+    ):
+        new_results = run_inspection(
+            uploaded_files,
+            confidence,
+            iou,
+            image_size,
+            max_det
+        )
+
+        st.session_state.inspection_results = new_results
+        st.session_state.inspection_timestamp = (
+            datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+        )
+
+        st.rerun()
+
+    if all_results:
+
+        st.markdown(
+            '<div class="section-title">04 / INSPECTION RESULTS</div>',
+            unsafe_allow_html=True
+        )
+
+        selected_name = st.selectbox(
+            "Select an inspected image",
+            [item["filename"] for item in all_results]
+        )
+
+        selected = next(
+            item for item in all_results
+            if item["filename"] == selected_name
+        )
+
+        original_col, result_col = st.columns(2)
+
+        with original_col:
+            st.markdown("#### ORIGINAL IMAGE")
+            st.image(
+                selected["original"],
+                use_container_width=True
+            )
+
+        with result_col:
+            st.markdown("#### AI DETECTION OUTPUT")
+            st.image(
+                selected["annotated"],
+                use_container_width=True
+            )
+
+        data = selected["dataframe"]
+
+        k1, k2, k3 = st.columns(3)
+
+        k1.metric("Defect Regions", len(data))
+        k2.metric(
+            "Unique Classes",
+            data["Defect Class"].nunique() if not data.empty else 0
+        )
+        k3.metric(
+            "Inference Time",
+            f'{selected["time"]:.3f} s'
+        )
+
+        if not data.empty:
+
+            st.markdown("#### DETECTION DETAILS")
+
+            st.dataframe(
+                data,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.markdown("#### INDIVIDUAL DEFECT CROPS")
+
+            crop_options = [
+                f'{index + 1}. {crop["class"]} — '
+                f'{crop["confidence"]}%'
+                for index, crop in enumerate(selected["crops"])
+            ]
+
+            selected_crop = st.selectbox(
+                "Select a detection",
+                crop_options
+            )
+
+            crop_index = crop_options.index(selected_crop)
+            crop = selected["crops"][crop_index]
+
+            crop_col, info_col = st.columns([1, 1])
+
+            with crop_col:
+                st.image(
+                    crop["image"],
+                    caption="Individual detected region",
+                    use_container_width=True
+                )
+
+            with info_col:
+                st.metric("Predicted Class", crop["class"])
+                st.metric(
+                    "Confidence",
+                    f'{crop["confidence"]}%'
+                )
+
+                st.caption(
+                    "This crop is extracted from the predicted bounding box."
+                )
+
+        else:
+            st.warning(
+                "No defect regions detected. Try adjusting the "
+                "confidence threshold or uploading another image."
+            )
+
+
+# --------------------------------------------------
+# ANALYTICS
+# --------------------------------------------------
+
+elif page == "Analytics":
+
+    st.markdown(
+        '<div class="section-title">01 / DETECTION ANALYTICS</div>',
+        unsafe_allow_html=True
+    )
+
+    if all_data.empty:
+        st.info(
+            "Run an inspection first to generate analytics."
+        )
+
+    else:
+
+        a1, a2, a3 = st.columns(3)
+
+        a1.metric("Total Detections", len(all_data))
+        a2.metric(
+            "Classes Found",
+            all_data["Defect Class"].nunique()
+        )
+        a3.metric(
+            "Mean Confidence",
+            f'{all_data["Confidence (%)"].mean():.2f}%'
+        )
+
+        st.markdown("### Defect Distribution")
+
+        distribution = (
+            all_data["Defect Class"]
+            .value_counts()
+            .reindex(CLASS_NAMES, fill_value=0)
+            .rename_axis("Defect Class")
+            .reset_index(name="Detections")
+        )
+
+        chart_col, table_col = st.columns(2)
+
+        with chart_col:
+            st.bar_chart(
+                distribution.set_index("Defect Class")
+            )
+
+        with table_col:
+            st.dataframe(
+                distribution,
+                use_container_width=True,
+                hide_index=True
+            )
+
+        st.markdown("### Confidence Analysis")
+
+        st.bar_chart(
+            all_data["Confidence (%)"]
+        )
+
+        st.markdown("### Confidence Statistics")
+
         st.dataframe(
-            class_summary,
+            all_data.groupby("Defect Class")[
+                "Confidence (%)"
+            ].agg(
+                ["count", "mean", "min", "max"]
+            ).round(2),
+            use_container_width=True
+        )
+
+        st.caption(
+            "These statistics describe model predictions, not "
+            "ground-truth precision or accuracy."
+        )
+
+
+# --------------------------------------------------
+# REPORTS
+# --------------------------------------------------
+
+elif page == "Inspection Reports":
+
+    st.markdown(
+        '<div class="section-title">01 / REPORT CENTER</div>',
+        unsafe_allow_html=True
+    )
+
+    if not all_results:
+        st.info(
+            "No inspection reports are available. Run an inspection first."
+        )
+
+    else:
+
+        st.write(
+            f"Inspection session: "
+            f"{st.session_state.inspection_timestamp or 'Available'}"
+        )
+
+        report_rows = []
+
+        for item in all_results:
+            report_rows.append({
+                "Image": item["filename"],
+                "Defect Regions": len(item["dataframe"]),
+                "Inference Time (s)": round(item["time"], 3),
+                "Resolution": f'{item["width"]} × {item["height"]}'
+            })
+
+        report_df = pd.DataFrame(report_rows)
+
+        st.dataframe(
+            report_df,
             use_container_width=True,
             hide_index=True
         )
 
-    st.markdown("#### Individual Detection Confidence")
-    st.bar_chart(
-        df[["Confidence (%)"]]
+        st.markdown("### Export Inspection Results")
+
+        st.download_button(
+            "⬇ DOWNLOAD COMPLETE INSPECTION ZIP",
+            data=create_report_zip(all_results),
+            file_name="steelvision_inspection_reports.zip",
+            mime="application/zip",
+            use_container_width=True
+        )
+
+        if not all_data.empty:
+            st.download_button(
+                "⬇ DOWNLOAD ALL DETECTIONS CSV",
+                data=all_data.to_csv(index=False).encode("utf-8"),
+                file_name="steelvision_all_detections.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+
+# --------------------------------------------------
+# ABOUT MODEL
+# --------------------------------------------------
+
+elif page == "About Model":
+
+    st.markdown(
+        '<div class="section-title">01 / MODEL INFORMATION</div>',
+        unsafe_allow_html=True
     )
 
-else:
-    st.warning(
-        "No defects were detected at the selected confidence threshold. "
-        "Try adjusting the inspection settings or uploading another image."
-    )
+    st.markdown("""
+    <div class="panel">
+        <h3>YOLO11n — Industrial Surface Defect Detector</h3>
+        <p class="info-text">
+        This application uses a custom-trained YOLO11n checkpoint
+        for object detection and classification of steel surface defects.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### Supported Classes")
+
+    for index, class_name in enumerate(CLASS_NAMES, start=1):
+        st.markdown(f"**{index:02d}.** {class_name}")
+
+    st.markdown("### Detection Pipeline")
+
+    st.write("""
+    1. Input image acquisition.
+    2. Image preprocessing by the YOLO inference pipeline.
+    3. Object detection and classification.
+    4. Confidence threshold filtering.
+    5. Non-Maximum Suppression.
+    6. Bounding-box visualization and report generation.
+    """)
+
+    st.markdown("### Important Evaluation Information")
+
+    st.info("""
+    Detection confidence is not equivalent to model accuracy.
+    Actual precision, recall, mAP50 and mAP50-95 must be calculated
+    using a separately labeled evaluation dataset.
+    """)
 
 
-# Detailed report
-st.markdown(
-    '<div class="section-title">05 / Detection Report</div>',
-    unsafe_allow_html=True
-)
+# --------------------------------------------------
+# FOOTER
+# --------------------------------------------------
 
-if total > 0:
-    st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True
-    )
-
-    buffer = BytesIO()
-    annotated_image.save(buffer, format="PNG")
-
-    st.download_button(
-        label="⬇ Download Annotated Inspection Image",
-        data=buffer.getvalue(),
-        file_name="steel_defect_inspection.png",
-        mime="image/png",
-        use_container_width=True
-    )
-
-    csv_data = df.to_csv(index=False).encode("utf-8")
-
-    st.download_button(
-        label="⬇ Download Detection Report (CSV)",
-        data=csv_data,
-        file_name="steel_defect_report.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
-
-else:
-    st.info("No detection report is available because no boxes were returned.")
-
-
-# Footer
 st.divider()
 
 st.markdown("""
-<div style="text-align:center; color:#8298ae; padding:12px;">
+<div style="text-align:center; color:#8ca3b9; padding:15px;">
     <b>STEELVISION AI</b><br>
-    Intelligent Industrial Surface Inspection<br>
-    <small>YOLO11n | Deep Learning | Computer Vision</small>
+    Intelligent Industrial Surface Inspection Platform<br>
+    <small>Custom-trained YOLO11n | PyTorch | Streamlit</small>
 </div>
 """, unsafe_allow_html=True)
