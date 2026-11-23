@@ -187,6 +187,7 @@ def create_detection_dataframe(result, model_names):
         rows.append({
             "Detection ID": index,
             "Defect Class": model_names[class_id],
+            "Confidence (%)": round(float(box.conf.item()) * 100, 1),
             "X1": round(coordinates[0], 1),
             "Y1": round(coordinates[1], 1),
             "X2": round(coordinates[2], 1),
@@ -196,6 +197,7 @@ def create_detection_dataframe(result, model_names):
     columns = [
         "Detection ID",
         "Defect Class",
+        "Confidence (%)",
         "X1", "Y1", "X2", "Y2"
     ]
 
@@ -221,6 +223,7 @@ def create_combined_dataframe(results):
         "Image",
         "Detection ID",
         "Defect Class",
+        "Confidence (%)",
         "X1", "Y1", "X2", "Y2"
     ]
 
@@ -329,7 +332,7 @@ def run_inspection(
             elapsed = time.perf_counter() - start_time
 
             annotated = Image.fromarray(
-                prediction.plot(conf=False)[..., ::-1]
+                prediction.plot(conf=True)[..., ::-1]
             )
 
             dataframe = create_detection_dataframe(
@@ -926,13 +929,13 @@ elif page == "About Model":
     3. Object detection and classification.
     4. Confidence threshold filtering (used internally by the detector).
     5. Non-Maximum Suppression.
-    6. Bounding-box visualization and report generation. Confidence values are not displayed in this application.
+    6. Bounding-box visualization and report generation. Detection confidence is shown as the model's raw score, as a percentage.
     """)
 
     st.markdown("### Important Evaluation Information")
 
     st.info("""
-    Detection confidence values are hidden in the user interface and exported reports.
+    Detection confidence values shown in the interface and exported reports are the model's raw scores, converted to percentages.
     Detection confidence is not equivalent to model accuracy. Actual precision,
     recall, mAP50 and mAP50-95 must be calculated using a separately labeled
     evaluation dataset.
